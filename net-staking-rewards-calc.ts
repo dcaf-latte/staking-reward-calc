@@ -35,6 +35,20 @@ async function getActivationEpochFromCurl(stakeAccount: web3.PublicKey) {
     }
 }
 
+function getCalendarDaysDifference(timestamp1: number, timestamp2: number): number {
+    // Convert Unix timestamps to Date objects
+    const date1 = new Date(timestamp1 * 1000);
+    const date2 = new Date(timestamp2 * 1000);
+
+    // Calculate the difference in milliseconds
+    const differenceMs = Math.abs(date1.getTime() - date2.getTime());
+
+    // Convert milliseconds to days
+    const differenceDays = differenceMs / (1000 * 60 * 60 * 24);
+
+    return differenceDays;
+}
+
 async function fetchStakeAccountsPubKeys(wallets: string[]): Promise<web3.PublicKey[]> {
     const stakeAccounts: web3.PublicKey[] = [];
 
@@ -69,44 +83,70 @@ async function calculateRewardForAccountConstant(stakeAccount: web3.PublicKey, a
         console.log("No post balance for account at activation epoch. Cannot calcualte reward")
         return 0;
     }
-    const initialBalance = postAccountBalanceAtActivationEpoch - rewardsAtActivationEpoch;
+    const initialDelegation = postAccountBalanceAtActivationEpoch - rewardsAtActivationEpoch;
 
-    const stakedRewards = currentBalance - initialBalance;
+    const stakedRewards = currentBalance - initialDelegation;
     return stakedRewards / (10**9)
-}
-
-async function calculateRewardsForAllAccounts(stakeAccounts: web3.PublicKey[]): Promise<number> {
-    let netRewardsSol = 0;
-    for (const account of stakeAccounts) {
-        const activationEpoch = await getActivationEpochFromCurl(account);
-        if(activationEpoch) {
-            const totalRewardForAccountSol = await calculateRewardForAccountConstant(account, activationEpoch)
-            netRewardsSol += totalRewardForAccountSol;
-        } else {
-            console.log(`Skipping stake account ${account}, probably never delegated`);
-        }
-    }
-    return netRewardsSol;
 }
 
 // This was a test to iterate through all the epochs - but it gave the same result as the constant soln
 // Ofc this is slow af
 async function calculateRewardForAccountIteration(stakeAccount: web3.PublicKey, activationEpoch: number) {
     let totalRewardSol = 0;
-    let epochCounter = activationEpoch + 1;
     const currentEpoch = await (await connection.getEpochInfo()).epoch;
-    console.log(currentEpoch);
+    console.log(activationEpoch);
+    const activationEpochRewardInfo = await connection.getInflationReward([stakeAccount], activationEpoch + 1);
+    const activationSlot = activationEpochRewardInfo[0]?.effectiveSlot;
+    console.log(activationEpochRewardInfo);
+    console.log(activationSlot)
+    if(!activationSlot) {
+        throw new Error("Cannot fetch activation slot");
+    }
+    const activationRewardTime = await connection.getBlockTime(activationSlot)
+    let prevEpochRewardTime = activationRewardTime;
 
+    let epochCounter = activationEpoch + 2;
     while(epochCounter < currentEpoch) {
-        const inflationReward = await connection.getInflationReward([stakeAccount], epochCounter);
-        const rewardAtEpochLamports = inflationReward[0]?.amount;
-        if(rewardAtEpochLamports) {
-            totalRewardSol += rewardAtEpochLamports / (10 ** 9)
+        console.log(`Current Epoch: ${epochCounter}`)
+        const currentEpochRewardInfo = await connection.getInflationReward([stakeAccount], epochCounter);
+        if(!currentEpochRewardInfo[0]) {
+            console.log("No reward info for epoch")
+            continue;
         }
-        console.log(totalRewardSol);
+        const currentEpochSlot = currentEpochRewardInfo[0].effectiveSlot;
+
+        const currentEpochRewardTime = await connection.getBlockTime(currentEpochSlot)
+        if(prevEpochRewardTime && currentEpochRewardTime) {
+            const epochCalenderDays = getCalendarDaysDifference(prevEpochRewardTime, currentEpochRewardTime)
+            console.log(`Epoch calender days - ${epochCalenderDays}`);
+        } else {
+            console.log(`No time available for epoch ${currentEpoch}`)
+        }
+        
+        
+        const rewardAtEpochLamports = currentEpochRewardInfo[0]?.amount;
+        if(rewardAtEpochLamports) {
+            console.log(`${rewardAtEpochLamports / (10 ** 9)} SOL`)
+        }
         epochCounter += 1;
+        prevEpochRewardTime = currentEpochRewardTime
+        console.log("")
     }
     return totalRewardSol;
+}
+
+async function runCalculateRewardsForAllAccounts(stakeAccounts: web3.PublicKey[]): Promise<number> {
+    let netRewardsSol = 0;
+    for (const account of stakeAccounts) {
+        const activationEpoch = await getActivationEpochFromCurl(account);
+        if(activationEpoch) {
+            const totalRewardForAccountSol = await calculateRewardForAccountIteration(account, activationEpoch)
+            netRewardsSol += totalRewardForAccountSol;
+        } else {
+            console.log(`Skipping stake account ${account}, probably never delegated`);
+        }
+    }
+    return netRewardsSol;
 }
 
 async function main() {
@@ -118,7 +158,7 @@ async function main() {
     const wallets = process.argv.slice(2);
 
     const stakingAccountsWithPubKeys = await fetchStakeAccountsPubKeys(wallets)
-    const rewards = await calculateRewardsForAllAccounts(stakingAccountsWithPubKeys);
+    const rewards = await runCalculateRewardsForAllAccounts(stakingAccountsWithPubKeys);
     console.log(`Net rewards: ${rewards} SOL`);
 }
 
